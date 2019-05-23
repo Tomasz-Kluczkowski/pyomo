@@ -1,6 +1,6 @@
 ##############################################################################
 # Institute for the Design of Advanced Energy Systems Process Systems
-# Engineering Framework (IDAES PSE Framework) Copyright (c) 2018, by the
+# Engineering Framework (IDAES PSE Framework) Copyright (c) 2018-2019, by the
 # software owners: The Regents of the University of California, through
 # Lawrence Berkeley National Laboratory,  National Technology & Engineering
 # Solutions of Sandia, LLC, Carnegie Mellon University, West Virginia
@@ -22,36 +22,14 @@ import logging
 import threading
 import datetime
 import json
+import sys
 from IPython import get_ipython
 import pyomo.contrib.viewer.report as rpt
 import pyomo.environ as pe
 
 _log = logging.getLogger(__name__)
 
-try: # this is for importing PyQt 4 or 5, looks a bit nasty, settle on pyqt5?
-    from PyQt5 import QtCore
-except:
-    _log.exception("Cannot import PyQt5.QtCore")
-    try:
-        from PyQt4 import QtCore
-    except:
-        _log.exception("Cannot import PyQt4.QtCore")
-        QtCore = None
-    else:
-        try:
-            from PyQt4.QtGui import QFileDialog, QMessageBox
-            from PyQt4 import uic
-        except:
-            _log.exception("Cannot import PyQt4")
-            QtCore = None
-else:
-    try:
-        from PyQt5.QtWidgets import QFileDialog, QMessageBox
-        from PyQt5 import uic
-    except:
-        _log.exception("Cannot import PyQt5")
-        QtCore = None
-
+from pyomo.contrib.viewer.pyqt_4or5 import *
 from pyomo.contrib.viewer.model_browser import ModelBrowser
 
 _mypath = os.path.dirname(__file__)
@@ -67,13 +45,20 @@ except:
     class _MainWindow(object):
         pass
 
-def get_mainwindow_nb(model=None, show=True):
+if not qt_available:
+    _log.error("Qt is not available. Cannot create UI classes.")
+    raise ImportError("Could not import PyQt4 or PyQt5")
+
+def get_mainwindow(model=None, show=True):
     """
-    Create a UI MainWindow to be used with a Jupyter notebook.
+    Create a UI MainWindow.
 
     Args:
         model: A Pyomo model to work with
         show: show the window after it is created
+    Returns:
+        (ui, model): ui is the MainWindow widget, and model is the linked Pyomo
+            model.  If no model is provided a new ConcreteModel is created
     """
     if model is None:
         model = pe.ConcreteModel()
@@ -82,17 +67,8 @@ def get_mainwindow_nb(model=None, show=True):
     if show: ui.show()
     return ui, model
 
-def setup_environment():
-    """
-    Setup the standard environment
-    """
-    lines = [
-        "import pyomo.environ as pe",
-        "from pyomo.environ import SolverFactory, TransformationFactory",
-        "from pyomo.contrib.viewer.ui import get_mainwindow_nb"]
-    lines = "\n".join(lines)
-    print(lines)
-    return(lines)
+def get_mainwindow_nb(model=None, show=True):
+    return get_mainwindow(model=model, show=show)
 
 
 class UISetup(QtCore.QObject):
@@ -119,14 +95,14 @@ class UISetup(QtCore.QObject):
         """
         self._begin_update = True
 
-    def end_update(self, noemit=False):
+    def end_update(self, emit=True):
         """
         Start automatically emitting update signal again when properties are
         changed and emit update for changes made between begin_update and
         end_update
         """
         self._begin_update = False
-        if not noemit: self.emit_update()
+        if emit: self.emit_update()
 
     def emit_update(self):
         if not self._begin_update: self.updated.emit()
@@ -140,49 +116,111 @@ class UISetup(QtCore.QObject):
         self._model = value
         self.emit_update()
 
+
 class MainWindow(_MainWindow, _MainWindowUI):
     def __init__(self, *args, **kwargs):
         model = self.model = kwargs.pop("model", None)
+        main = self.model = kwargs.pop("main", None)
         flags = kwargs.pop("flags", 0)
         if kwargs.pop("ontop", False):
             kwargs[flags] = flags | QtCore.Qt.WindowStaysOnTopHint
         self.ui_setup = UISetup(model=model)
         self.ui_setup.updated.connect(self.update_model)
-
         super(MainWindow, self).__init__(*args, **kwargs)
         self.setupUi(self)
+        self.setCentralWidget(self.mdiArea)
 
-        # Create model browsers these are dock widgets
-        uis = self.ui_setup
-        self.vars = ModelBrowser(parent=self, standard="Var", ui_setup=uis)
-        self.cons = ModelBrowser(parent=self, standard="Constraint", ui_setup=uis)
-        self.params = ModelBrowser(parent=self, standard="Param", ui_setup=uis)
-        self.exprs = ModelBrowser(parent=self, standard="Expression", ui_setup=uis)
+        self._refresh_list = []
+        self.variables = None
+        self.constraints = None
+        self.expressions = None
+        self.parameters = None
 
-        # Dock the wigetes allong the bottom and tabify them
-        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.vars)
-        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.cons)
-        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.params)
-        self.addDockWidget(QtCore.Qt.BottomDockWidgetArea, self.exprs)
-        self.tabifyDockWidget(self.vars, self.params)
-        self.tabifyDockWidget(self.vars, self.exprs)
-        self.tabifyDockWidget(self.vars, self.cons)
-        self.vars.raise_()
+        self.variables_restart()
+        self.expressions_restart()
+        self.constraints_restart()
+        self.parameters_restart()
 
-        # Set menu actions (rembeber the menu items are defined in the ui file)
+
+        self.mdiArea.tileSubWindows()
+
+        # Set menu actions (remember the menu items are defined in the ui file)
         # you can edit the menus in qt-designer
         self.action_Exit.triggered.connect(self.exit_action)
-        self.action_toggle_variables.triggered.connect(self.vars.toggle)
-        self.action_toggle_constraints.triggered.connect(self.cons.toggle)
-        self.action_toggle_parameters.triggered.connect(self.params.toggle)
-        self.action_toggle_expressions.triggered.connect(self.exprs.toggle)
-        self.actionToggle_Always_on_Top.triggered.connect(self.toggle_always_on_top)
+        self.actionRestart_Variable_View.triggered.connect(
+            self.variables_restart)
+        self.actionRestart_Constraint_View.triggered.connect(
+            self.constraints_restart)
+        self.actionRestart_Parameter_View.triggered.connect(
+            self.parameters_restart)
+        self.actionRestart_Expression_View.triggered.connect(
+            self.expressions_restart)
         self.actionInformation.triggered.connect(self.model_information)
-        self.actionCalculateConstraints.triggered.connect(self.cons.calculate_all)
-        self.actionCalculateExpressions.triggered.connect(self.exprs.calculate_all)
+        self.actionCalculateConstraints.triggered.connect(
+            self.calculate_constraints)
+        self.actionCalculateExpressions.triggered.connect(
+            self.calculate_expressions)
+        self.actionTile.triggered.connect(self.mdiArea.tileSubWindows)
+        self.actionCascade.triggered.connect(self.mdiArea.cascadeSubWindows)
+        self.actionTabs.triggered.connect(self.toggle_tabs)
+
+    def toggle_tabs(self):
+        self.mdiArea.setViewMode(not self.mdiArea.viewMode())
+
+    def _tree_restart(self, w, standard):
+        """
+        Start/Restart the variables window
+        """
+        try:
+            self._refresh_list.remove(w)
+        except ValueError: # not in list? that's okay
+            pass
+        try:
+            try:
+                self.mdiArea.removeSubWindow(w.parent())
+            except RuntimeError: # user closed with "X" button
+                pass
+            del w
+            w = None
+        except AttributeError:
+            pass
+        w = ModelBrowser(standard=standard, ui_setup=self.ui_setup)
+        self.mdiArea.addSubWindow(w)
+        w.parent().show() # parent is now a MdiAreaSubWindow
+        self._refresh_list.append(w)
+        return w
+
+    def variables_restart(self):
+        self.variables = self._tree_restart(self.variables, "Var")
+
+    def expressions_restart(self):
+        self.expressions = self._tree_restart(self.expressions, "Expression")
+
+    def parameters_restart(self):
+        self.parameters = self._tree_restart(self.parameters, "Param")
+
+    def constraints_restart(self):
+        self.constraints = self._tree_restart(self.constraints, "Constraint")
+
+    def calculate_constraints(self):
+        self.constraints.calculate_all()
+        self.refresh_on_execute()
+
+    def calculate_expressions(self):
+        self.expressions.calculate_all()
+        self.refresh_on_execute()
+
+    def set_model(self, model):
+        self.ui_setup.model = model
 
     def update_model(self):
-        pass
+        """
+        Play it safe by restarting all the tree view widgets when the model updates
+        """
+        self.variables_restart()
+        self.expressions_restart()
+        self.constraints_restart()
+        self.parameters_restart()
 
     def model_information(self):
         """
@@ -218,23 +256,17 @@ class MainWindow(_MainWindow, _MainWindowUI):
             "{}  -- {} of freedom\n"\
             .format(active_eq, free_vars, dof, doftext))
 
-    def toggle_always_on_top(self):
-        """
-        This toggles the always on top hint.  Whether this has any effect after
-        the main window is created probably depends on the system.
-        """
-        self.setWindowFlags(window.windowFlags() ^ QtCore.Qt.WindowStaysOnTopHint)
-
     def refresh_on_execute(self):
         """
         This is the call back function that happens when code is executed in the
         ipython kernel.  The main purpose of this right now it to refresh the
         UI display so that it matches the current state of the model.
         """
-        self.vars.refresh()
-        self.cons.refresh()
-        self.exprs.refresh()
-        self.params.refresh()
+        for w in self._refresh_list:
+            try:
+                w.refresh()
+            except RuntimeError: # window closed by user pushing "X" button
+                pass
 
     def exit_action(self):
         """
