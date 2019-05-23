@@ -1,6 +1,7 @@
 branches:
   only:
   - master
+  - solver_redesign
 cache: false
 language: generic
 services:
