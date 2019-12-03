@@ -161,12 +161,22 @@ class BendersCutGeneratorData(_BlockData):
         self.tol = None
         self.all_master_etas = list()
         self._subproblem_ndx_map = dict()  # map from ndx in self.subproblems (local) to the global subproblem ndx
+        self._subproblem_z = None
 
     def global_num_subproblems(self):
         return int(self.num_subproblems_by_rank.sum())
 
     def local_num_subproblems(self):
         return len(self.subproblems)
+
+    def get_subproblem_z(self):
+        """
+        Returns
+        -------
+        z: np.ndarray
+            A numpy array of the z for each subproblem (see docstring at the top of this file)
+        """
+        return self._subproblem_z
 
     def set_input(self, master_vars, tol=1e-6):
         """
@@ -191,6 +201,7 @@ class BendersCutGeneratorData(_BlockData):
         self.subproblem_solvers = list()
         self.all_master_etas = list()
         self._subproblem_ndx_map = dict()
+        self._subproblem_z = None
 
     def add_subproblem(self, subproblem_fn, subproblem_fn_kwargs, master_eta, subproblem_solver='gurobi_persistent', relax_subproblem_cons=False):
         _rank = np.argmin(self.num_subproblems_by_rank)
@@ -278,6 +289,8 @@ class BendersCutGeneratorData(_BlockData):
         comm.Allreduce([constants, MPI.DOUBLE], [global_constants, MPI.DOUBLE])
         comm.Allreduce([eta_coeffs, MPI.DOUBLE], [global_eta_coeffs, MPI.DOUBLE])
         comm.Allreduce([coefficients, MPI.DOUBLE], [global_coeffs, MPI.DOUBLE])
+
+        self._subproblem_z = global_constants
 
         global_constants = [float(i) for i in global_constants]
         global_coeffs = [float(i) for i in global_coeffs]
